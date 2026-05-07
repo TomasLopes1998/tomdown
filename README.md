@@ -8,7 +8,10 @@ No GitHub API calls, no rate limits. One CDN fetch on page load (Mermaid.js + th
 
 - [`uv`](https://docs.astral.sh/uv/) (the script is a [PEP 723](https://peps.python.org/pep-0723/) inline-deps script — first run resolves a cached venv, subsequent runs are instant)
 - A modern desktop browser (any Chromium/Firefox/WebKit)
-- Linux: `xdg-utils` (`xdg-mime`, `xdg-open`) — or Windows 10/11
+- One of:
+  - **Linux** with `xdg-utils` (`xdg-mime`, `xdg-open`)
+  - **macOS** 10.13+ (optional: [`duti`](https://github.com/moretension/duti) — `brew install duti` — to set the `.md` default automatically)
+  - **Windows** 10 / 11
 
 ## Install (Linux)
 
@@ -25,6 +28,32 @@ This will:
 3. Set it as the default handler for `text/markdown` and `text/x-markdown` via `xdg-mime`.
 
 Make sure `~/.local/bin` is on your `PATH` (most Linux distros add it automatically; if not, add it to your shell rc).
+
+## Install (macOS)
+
+From the repo root:
+
+```bash
+./install.sh
+```
+
+The same script auto-detects macOS via `uname -s` and runs the macOS path. It will:
+
+1. Build a real `tomdown.app` bundle in `~/Applications/tomdown.app`.
+   - `Contents/Resources/tomdown.py` — the Python script (shebang stripped).
+   - `Contents/MacOS/tomdown` — a tiny bash launcher that re-invokes `uv run --script` on the script. It also injects `~/.local/bin`, `/opt/homebrew/bin`, and `/usr/local/bin` into `PATH` so `uv` resolves under Launch Services' minimal env, and strips the `-psn_X_X` arg that Launch Services sometimes passes.
+   - `Contents/Info.plist` — declares the bundle and a `CFBundleDocumentTypes` entry for `.md`, `.markdown`, `.mdown`, `.mkd` with `LSHandlerRank=Default`.
+2. Register the bundle with Launch Services (`lsregister -f`) so Finder picks it up.
+3. Symlink the launcher to `~/.local/bin/tomdown` for terminal use. Make sure that directory is on your `PATH`.
+4. If [`duti`](https://github.com/moretension/duti) is installed, set tomdown as the default for `.md` and the `net.daringfireball.markdown` UTI. Otherwise, do this once manually: right-click any `.md` in Finder → **Open With → Other…**, pick `tomdown.app`, tick **Always Open With**.
+
+Open a Markdown file with:
+
+```bash
+open path/to/file.md            # if tomdown is the default
+open -a tomdown path/to/file.md
+tomdown path/to/file.md
+```
 
 ## Install (Windows)
 
@@ -64,13 +93,14 @@ In a file manager (Files/Nautilus/Dolphin), double-click works too.
 
 ## Uninstall
 
-Linux:
+Linux / macOS:
 
 ```bash
 ./uninstall.sh
 ```
 
-Removes the binary, desktop entry, and resets the mime defaults.
+- **Linux** — removes `~/.local/bin/tomdown` and the desktop entry, resets the mime defaults.
+- **macOS** — unregisters the bundle from Launch Services, removes `~/Applications/tomdown.app` and the `~/.local/bin/tomdown` symlink. If `duti` is installed and `.md` was still pointing at tomdown, it bounces the default back to TextEdit.
 
 Windows:
 
@@ -96,6 +126,18 @@ When invoked:
 
 The whole thing is ~150 lines. See `tomdown` in this folder.
 
+### File-association mechanics by platform
+
+Same Python script everywhere; only the OS glue differs.
+
+| Platform | Where it lives | How `.md` opens it |
+|---|---|---|
+| Linux  | `~/.local/bin/tomdown` (executable, shebang dispatched) + `~/.local/share/applications/tomdown.desktop` | `xdg-mime default tomdown.desktop text/markdown` |
+| macOS  | `~/Applications/tomdown.app` (real `.app` bundle) + `~/.local/bin/tomdown` symlink for CLI use | `lsregister -f` registers the bundle; `Info.plist` declares `CFBundleDocumentTypes` with `LSHandlerRank=Default`; `duti` (optional) pins it as the default |
+| Windows| `%LOCALAPPDATA%\Programs\tomdown\tomdown.py` + `tomdown.cmd` shim | `HKCU\Software\Classes\.md` → ProgID `tomdown.markdown` whose `shell\open\command` runs the shim |
+
+The macOS `.app` is the only "real bundle" — Launch Services binds defaults to bundle identifiers, not arbitrary executables, so a bundle is unavoidable if we want Finder double-click to work. The bundle's `MacOS/tomdown` is just a 10-line bash launcher that calls `uv run --script` on `Resources/tomdown.py`.
+
 ### Mermaid embedding
 
 Mermaid blocks are not HTML-escaped into a `<pre class="mermaid">`. Instead, the raw source is JSON-encoded into a `<script type="application/json" data-mm="…">` tag (with `<`, `>`, `&`, U+2028, U+2029 escaped to their `\uXXXX` forms so the script tag can't be terminated or break JS string literals). On load, a small module script copies each tag's source into a paired `<div class="mermaid-host">`, adds the `mermaid` class, and calls `mermaid.run()` explicitly (`startOnLoad: false`).
@@ -108,8 +150,10 @@ This avoids two common failure modes: (a) HTML entity round-tripping that breaks
 
 ## Troubleshooting
 
-- **`uv: command not found`** — install [uv](https://docs.astral.sh/uv/getting-started/installation/) first.
+- **`uv: command not found`** — install [uv](https://docs.astral.sh/uv/getting-started/installation/) first. On macOS, if it works in your shell but Finder double-click fails, the launcher already prepends `~/.local/bin`, `/opt/homebrew/bin`, and `/usr/local/bin` to `PATH` — if your `uv` lives somewhere else, edit `~/Applications/tomdown.app/Contents/MacOS/tomdown`.
 - **Browser opens but page doesn't load** — check `pgrep -f tomdown`; the script may have already self-terminated. Try opening from a terminal to see stderr.
 - **First launch is slow** — `uv` is downloading deps into its cache. Subsequent launches are instant.
 - **Mermaid diagram shows as raw code** — make sure the fence is exactly ` ```mermaid ` (lowercase, no extra space).
-- **Default app didn't change** — some desktop environments cache mime associations. Log out and back in, or run `update-desktop-database ~/.local/share/applications`.
+- **Linux: default app didn't change** — some desktop environments cache mime associations. Log out and back in, or run `update-desktop-database ~/.local/share/applications`.
+- **macOS: Finder still opens .md in TextEdit / Xcode** — Launch Services has its own cache. Either install `duti` and re-run `./install.sh`, or right-click an `.md` file → **Open With → Other…** → pick `tomdown.app` → tick **Always Open With**. As a last resort, rebuild the LS database: `/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -kill -r -domain local -domain system -domain user`.
+- **macOS: Gatekeeper blocks the bundle ("damaged or can't be opened")** — only happens if the `.app` is moved across systems with quarantine. Clear it with `xattr -dr com.apple.quarantine ~/Applications/tomdown.app`.
