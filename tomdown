@@ -1,0 +1,277 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#   "markdown-it-py>=3.0",
+#   "mdit-py-plugins>=0.4",
+#   "linkify-it-py>=2.0",
+#   "Pygments>=2.17",
+# ]
+# ///
+"""Render a Markdown file in the browser with Mermaid + auto-reload."""
+
+from __future__ import annotations
+
+import http.server
+import json
+import secrets
+import socket
+import socketserver
+import sys
+import threading
+import time
+import webbrowser
+from html import escape
+from pathlib import Path
+
+from markdown_it import MarkdownIt
+from mdit_py_plugins.anchors import anchors_plugin
+from mdit_py_plugins.deflist import deflist_plugin
+from mdit_py_plugins.footnote import footnote_plugin
+from mdit_py_plugins.tasklists import tasklists_plugin
+from pygments import highlight
+from pygments.formatters import HtmlFormatter
+from pygments.lexers import get_lexer_by_name
+from pygments.util import ClassNotFound
+
+
+def json_for_script(obj: object) -> str:
+    """JSON-encode and escape characters that could terminate a <script> tag."""
+    return (
+        json.dumps(obj, ensure_ascii=False)
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("&", "\\u0026")
+        .replace(" ", "\\u2028")
+        .replace(" ", "\\u2029")
+    )
+
+
+def highlight_code(code: str, lang: str, _attrs: str) -> str:
+    if lang == "mermaid":
+        # Embed the raw Mermaid source as JSON inside a script tag.
+        # This avoids HTML entity round-tripping issues that break Mermaid's
+        # parser when labels contain characters like &, <, >, or quotes.
+        mm_id = secrets.token_hex(4)
+        payload = json_for_script({"src": code})
+        return (
+            f'<div class="mermaid-host" data-mm="{mm_id}">'
+            f'<div class="mermaid-loading">rendering diagram…</div>'
+            f"</div>"
+            f'<script type="application/json" data-mm="{mm_id}">{payload}</script>'
+        )
+    if not lang:
+        return ""
+    try:
+        lexer = get_lexer_by_name(lang)
+    except ClassNotFound:
+        return ""
+    return highlight(code, lexer, HtmlFormatter(cssclass="highlight"))
+
+
+MD = (
+    MarkdownIt(
+        "gfm-like",
+        {"html": True, "linkify": True, "typographer": True, "highlight": highlight_code},
+    )
+    .use(tasklists_plugin)
+    .use(footnote_plugin)
+    .use(deflist_plugin)
+    .use(anchors_plugin, max_level=4, permalink=True, permalinkSymbol="#")
+)
+
+PYGMENTS_DARK_CSS = HtmlFormatter(style="github-dark").get_style_defs('[data-theme="dark"] .highlight')
+PYGMENTS_LIGHT_CSS = HtmlFormatter(style="default").get_style_defs('[data-theme="light"] .highlight')
+
+TEMPLATE = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>{title}</title>
+<script>
+(function() {{
+  const saved = localStorage.getItem('tomdown-theme');
+  const sysDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+  document.documentElement.dataset.theme = saved || (sysDark ? 'dark' : 'light');
+}})();
+</script>
+<link id="md-css-dark"  rel="stylesheet" href="https://cdn.jsdelivr.net/npm/github-markdown-css@5/github-markdown-dark.min.css">
+<link id="md-css-light" rel="stylesheet" href="https://cdn.jsdelivr.net/npm/github-markdown-css@5/github-markdown-light.min.css">
+<script>
+(function() {{
+  const t = document.documentElement.dataset.theme;
+  document.getElementById('md-css-light').disabled = (t !== 'light');
+  document.getElementById('md-css-dark').disabled  = (t !== 'dark');
+}})();
+</script>
+<style>
+  :root[data-theme="dark"]  {{ --bg:#0d1117; --surface:#161b22; --surface-hi:#21262d; --border:#30363d; --text:#e6edf3; --muted:#8b949e; --accent:#58a6ff; --error:#f85149; --code-bg:rgba(110,118,129,0.4); color-scheme: dark; }}
+  :root[data-theme="light"] {{ --bg:#ffffff; --surface:#f6f8fa; --surface-hi:#eaeef2; --border:#d0d7de; --text:#1f2328; --muted:#59636e; --accent:#0969da; --error:#cf222e; --code-bg:rgba(175,184,193,0.2); color-scheme: light; }}
+  body {{ background: var(--bg); margin: 0; }}
+  .container {{ max-width: 980px; margin: 0 auto; padding: 48px 64px 96px; }}
+  .markdown-body {{ background: transparent; color: var(--text); font-size: 16px; }}
+  .markdown-body .mermaid-host {{ background: var(--surface); padding: 24px; border-radius: 8px; text-align: center; overflow: auto; border: 1px solid var(--border); margin-bottom: 16px; }}
+  .markdown-body .mermaid-host svg {{ max-width: 100%; height: auto; }}
+  .markdown-body .mermaid-loading {{ color: var(--muted); font-family: ui-monospace, SFMono-Regular, monospace; font-size: 12px; }}
+  .markdown-body .mermaid-error {{ color: var(--error); font-family: ui-monospace, SFMono-Regular, monospace; font-size: 12px; text-align: left; white-space: pre-wrap; }}
+  .markdown-body pre {{ background: var(--surface) !important; border: 1px solid var(--border); }}
+  .markdown-body .highlight pre {{ background: transparent !important; border: none; padding: 0; }}
+  .markdown-body .highlight {{ background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px; margin-bottom: 16px; overflow: auto; }}
+  .markdown-body table tr {{ background: transparent; }}
+  .markdown-body table tr:nth-child(2n) {{ background: var(--surface); }}
+  .markdown-body blockquote {{ color: var(--muted); border-left-color: var(--border); }}
+  .markdown-body h1, .markdown-body h2 {{ border-bottom-color: var(--border); }}
+  .markdown-body a {{ color: var(--accent); }}
+  .markdown-body code {{ background: var(--code-bg); }}
+  {pygments_dark_css}
+  {pygments_light_css}
+  .theme-toggle {{ position: fixed; top: 16px; right: 16px; background: var(--surface); color: var(--text); border: 1px solid var(--border); width: 36px; height: 36px; padding: 0; border-radius: 999px; font-size: 16px; cursor: pointer; line-height: 1; display: inline-flex; align-items: center; justify-content: center; }}
+  .theme-toggle:hover {{ background: var(--surface-hi); }}
+  [data-theme="dark"]  .theme-icon-light {{ display: none; }}
+  [data-theme="light"] .theme-icon-dark  {{ display: none; }}
+  .pill {{ position: fixed; bottom: 16px; right: 16px; background: var(--surface); color: var(--muted); padding: 6px 12px; border-radius: 999px; font-size: 11px; font-family: ui-monospace, SFMono-Regular, monospace; opacity: 0.6; border: 1px solid var(--border); }}
+</style>
+</head>
+<body>
+<button id="theme-toggle" class="theme-toggle" type="button" aria-label="Toggle theme" title="Toggle theme">
+  <span class="theme-icon-dark" aria-hidden="true">☾</span>
+  <span class="theme-icon-light" aria-hidden="true">☀</span>
+</button>
+<article class="markdown-body container">
+{body}
+</article>
+<div class="pill">live</div>
+<script type="module">
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+
+  const sources = {{}};
+  for (const s of document.querySelectorAll('script[type="application/json"][data-mm]')) {{
+    sources[s.dataset.mm] = JSON.parse(s.textContent).src;
+  }}
+
+  function mermaidThemeFor(t) {{ return t === 'dark' ? 'dark' : 'default'; }}
+
+  async function renderMermaid() {{
+    for (const id in sources) {{
+      const host = document.querySelector(`.mermaid-host[data-mm="${{id}}"]`);
+      if (!host) continue;
+      host.removeAttribute('data-processed');
+      host.textContent = sources[id];
+      host.classList.add('mermaid');
+    }}
+    const t = document.documentElement.dataset.theme;
+    mermaid.initialize({{ startOnLoad: false, theme: mermaidThemeFor(t), securityLevel: 'loose' }});
+    try {{
+      await mermaid.run({{ querySelector: '.mermaid' }});
+    }} catch (e) {{
+      console.error('mermaid.run failed:', e);
+    }}
+  }}
+
+  function applyTheme(t) {{
+    document.documentElement.dataset.theme = t;
+    localStorage.setItem('tomdown-theme', t);
+    document.getElementById('md-css-light').disabled = (t !== 'light');
+    document.getElementById('md-css-dark').disabled  = (t !== 'dark');
+  }}
+
+  document.getElementById('theme-toggle').addEventListener('click', async () => {{
+    const cur = document.documentElement.dataset.theme;
+    applyTheme(cur === 'dark' ? 'light' : 'dark');
+    await renderMermaid();
+  }});
+
+  await renderMermaid();
+
+  const initial = {mtime};
+  setInterval(async () => {{
+    try {{
+      const r = await fetch("/_mtime");
+      const t = parseFloat(await r.text());
+      if (t > initial) location.reload();
+    }} catch (e) {{}}
+  }}, 1000);
+</script>
+</body>
+</html>
+"""
+
+
+def render(file_path: Path) -> bytes:
+    body = MD.render(file_path.read_text(encoding="utf-8"))
+    html = TEMPLATE.format(
+        title=escape(file_path.name),
+        body=body,
+        pygments_dark_css=PYGMENTS_DARK_CSS,
+        pygments_light_css=PYGMENTS_LIGHT_CSS,
+        mtime=file_path.stat().st_mtime,
+    )
+    return html.encode("utf-8")
+
+
+def make_handler(file_path: Path, last_seen: list[float]):
+    parent = str(file_path.parent)
+
+    class Handler(http.server.SimpleHTTPRequestHandler):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, directory=parent, **kwargs)
+
+        def log_message(self, *args, **kwargs):
+            pass
+
+        def do_GET(self):
+            last_seen[0] = time.monotonic()
+            if self.path == "/_mtime":
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain")
+                self.end_headers()
+                self.wfile.write(str(file_path.stat().st_mtime).encode())
+                return
+            if self.path in ("/", f"/{file_path.name}"):
+                payload = render(file_path)
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+                return
+            super().do_GET()
+
+    return Handler
+
+
+def free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+IDLE_TIMEOUT = 8.0  # seconds with no client poll before assuming the tab is gone
+
+
+def main() -> int:
+    if len(sys.argv) < 2:
+        print("usage: tomdown <file.md>", file=sys.stderr)
+        return 2
+    path = Path(sys.argv[1]).expanduser().resolve()
+    if not path.is_file():
+        print(f"not a file: {path}", file=sys.stderr)
+        return 1
+    last_seen = [time.monotonic()]
+    port = free_port()
+    server = socketserver.ThreadingTCPServer(("127.0.0.1", port), make_handler(path, last_seen))
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    webbrowser.open(f"http://127.0.0.1:{port}/")
+    try:
+        while True:
+            time.sleep(2)
+            if time.monotonic() - last_seen[0] > IDLE_TIMEOUT:
+                break
+    except KeyboardInterrupt:
+        pass
+    server.shutdown()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
