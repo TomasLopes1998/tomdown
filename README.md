@@ -6,16 +6,16 @@ No GitHub API calls, no rate limits. One CDN fetch on page load (Mermaid.js + th
 
 ## Requirements
 
-- Linux with `xdg-utils` (`xdg-mime`, `xdg-open`)
 - [`uv`](https://docs.astral.sh/uv/) (the script is a [PEP 723](https://peps.python.org/pep-0723/) inline-deps script — first run resolves a cached venv, subsequent runs are instant)
 - A modern desktop browser (any Chromium/Firefox/WebKit)
+- Linux: `xdg-utils` (`xdg-mime`, `xdg-open`) — or Windows 10/11
 
-## Install
+## Install (Linux)
 
 From the repo root:
 
 ```bash
-./tools/tomdown/install.sh
+./install.sh
 ```
 
 This will:
@@ -25,6 +25,22 @@ This will:
 3. Set it as the default handler for `text/markdown` and `text/x-markdown` via `xdg-mime`.
 
 Make sure `~/.local/bin` is on your `PATH` (most Linux distros add it automatically; if not, add it to your shell rc).
+
+## Install (Windows)
+
+From the repo root, in PowerShell:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+This is a per-user install — no admin/UAC prompt. It will:
+
+1. Copy the script to `%LOCALAPPDATA%\Programs\tomdown\tomdown.py` and a `tomdown.cmd` shim alongside it.
+2. Add that directory to your **user** `PATH`.
+3. Register a per-user ProgID (`tomdown.markdown`) under `HKCU\Software\Classes` and set it as the default for `.md` files.
+
+Open a new terminal afterwards so the updated `PATH` is picked up. The first time you double-click a `.md` file in Explorer, Windows may show the "How do you want to open this?" prompt — pick **tomdown** and tick *Always use this app*. That prompt is a Windows policy and the installer can't dismiss it on your behalf.
 
 ## Usage
 
@@ -48,11 +64,23 @@ In a file manager (Files/Nautilus/Dolphin), double-click works too.
 
 ## Uninstall
 
+Linux:
+
 ```bash
-./tools/tomdown/uninstall.sh
+./uninstall.sh
 ```
 
-Removes the binary, desktop entry, and resets the mime defaults. Does not delete `uv`'s cached venv.
+Removes the binary, desktop entry, and resets the mime defaults.
+
+Windows:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\uninstall.ps1
+```
+
+Removes the install dir, drops the ProgID from `HKCU\Software\Classes`, clears the `.md` default if it was pointing at tomdown, and strips the install dir from your user `PATH`.
+
+Neither uninstaller deletes `uv`'s cached venv.
 
 ## How it works
 
